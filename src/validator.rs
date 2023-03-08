@@ -15,10 +15,10 @@ use std::collections::{HashMap, HashSet};
 
 use pest::error::{Error, ErrorVariant, InputLocation};
 use pest::iterators::Pairs;
+use pest::unicode::unicode_property_names;
 use pest::Span;
 
 use crate::parser::{ParserExpr, ParserNode, ParserRule, Rule};
-use crate::UNICODE_PROPERTY_NAMES;
 
 static RUST_KEYWORDS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     [
@@ -66,12 +66,11 @@ static BUILTINS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     ]
     .iter()
     .cloned()
-    .chain(UNICODE_PROPERTY_NAMES.iter().cloned())
+    .chain(unicode_property_names())
     .collect::<HashSet<&str>>()
 });
 
 /// It checks the parsed grammar for common mistakes:
-/// - using Rust keywords
 /// - using Pest keywords
 /// - duplicate rules
 /// - undefined rules
@@ -82,8 +81,11 @@ pub fn validate_pairs(pairs: Pairs<'_, Rule>) -> Result<Vec<&str>, Vec<Error<Rul
     let definitions: Vec<_> = pairs
         .clone()
         .filter(|pair| pair.as_rule() == Rule::grammar_rule)
-        .map(|pair| pair.into_inner().next().unwrap().as_span())
+        .map(|pair| pair.into_inner().next().unwrap())
+        .filter(|pair| pair.as_rule() != Rule::line_doc)
+        .map(|pair| pair.as_span())
         .collect();
+
     let called_rules: Vec<_> = pairs
         .clone()
         .filter(|pair| pair.as_rule() == Rule::grammar_rule)
@@ -98,7 +100,6 @@ pub fn validate_pairs(pairs: Pairs<'_, Rule>) -> Result<Vec<&str>, Vec<Error<Rul
 
     let mut errors = vec![];
 
-    errors.extend(validate_rust_keywords(&definitions));
     errors.extend(validate_pest_keywords(&definitions));
     errors.extend(validate_already_defined(&definitions));
     errors.extend(validate_undefined(&definitions, &called_rules));
@@ -117,6 +118,7 @@ pub fn validate_pairs(pairs: Pairs<'_, Rule>) -> Result<Vec<&str>, Vec<Error<Rul
 
 /// Validates that the given `definitions` do not contain any Rust keywords.
 #[allow(clippy::ptr_arg)]
+#[deprecated = "Rust keywords are no longer restricted from the pest grammar"]
 pub fn validate_rust_keywords(definitions: &Vec<Span<'_>>) -> Vec<Error<Rule>> {
     let mut errors = vec![];
 
@@ -503,22 +505,6 @@ mod tests {
     use super::super::unwrap_or_report;
     use super::*;
     use pest::Parser;
-
-    #[test]
-    #[should_panic(expected = "grammar error
-
- --> 1:1
-  |
-1 | let = { \"a\" }
-  | ^-^
-  |
-  = let is a rust keyword")]
-    fn rust_keyword() {
-        let input = "let = { \"a\" }";
-        unwrap_or_report(validate_pairs(
-            PestParser::parse(Rule::grammar_rules, input).unwrap(),
-        ));
-    }
 
     #[test]
     #[should_panic(expected = "grammar error
