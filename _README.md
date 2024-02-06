@@ -11,7 +11,7 @@
 
 [![pest Continuous Integration](https://github.com/pest-parser/pest/actions/workflows/ci.yml/badge.svg)](https://github.com/pest-parser/pest/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/pest-parser/pest/branch/master/graph/badge.svg)](https://codecov.io/gh/pest-parser/pest)
-<a href="https://blog.rust-lang.org/2021/11/01/Rust-1.56.1.html"><img alt="Rustc Version 1.56.1+" src="https://img.shields.io/badge/rustc-1.56.1%2B-lightgrey.svg"/></a>
+<a href="https://blog.rust-lang.org/2021/11/01/Rust-1.61.0.html"><img alt="Rustc Version 1.61.0+" src="https://img.shields.io/badge/rustc-1.61.0%2B-lightgrey.svg"/></a>
 
 [![Crates.io](https://img.shields.io/crates/d/pest.svg)](https://crates.io/crates/pest)
 [![Crates.io](https://img.shields.io/crates/v/pest.svg)](https://crates.io/crates/pest)
@@ -93,10 +93,7 @@ The grammar can be used to derive a `Parser` implementation automatically.
 Parsing returns an iterator of nested token pairs:
 
 ```rust
-extern crate pest;
-#[macro_use]
-extern crate pest_derive;
-
+use pest_derive::Parser;
 use pest::Parser;
 
 #[derive(Parser)]
@@ -104,7 +101,7 @@ use pest::Parser;
 struct IdentParser;
 
 fn main() {
-    let pairs = IdentParser::parse(Rule::ident_list, "a1 b2").unwrap_or_else(|e| panic!("{}", e));
+    let pairs = IdentParser::parse(Rule::ident_list, "a1 b2").unwrap_or_else(|e| panic!("{}", e));
 
     // Because ident_list is silent, the iterator will contain idents
     for pair in pairs {
@@ -167,6 +164,8 @@ mod b {
 
 ## Projects using pest
 
+You can find more projects and ecosystem tools in the [awesome-pest](https://github.com/pest-parser/awesome-pest) repo.
+
 * [pest_meta](https://github.com/pest-parser/pest/blob/master/meta/src/grammar.pest) (bootstrapped)
 * [AshPaper](https://github.com/shnewto/ashpaper)
 * [brain](https://github.com/brain-lang/brain)
@@ -197,11 +196,35 @@ mod b {
 * [qubit](https://github.com/abhimanyu003/qubit)
 * [caith](https://github.com/Geobert/caith) (a dice roller crate)
 * [Melody](https://github.com/yoav-lavi/melody)
+* [json5-nodes](https://github.com/jlyonsmith/json5-nodes)
+* [prisma](https://github.com/prisma/prisma)
 
 ## Minimum Supported Rust Version (MSRV)
 
-This library should always compile with default features on **Rust 1.56.1** 
-or **Rust 1.61** with `const_prec_climber`.
+This library should always compile with default features on **Rust 1.61.0**.
+
+## no_std support
+
+The `pest` and `pest_derive` crates can be built without the Rust standard
+library and target embedded environments. To do so, you need to disable
+their default features. In your `Cargo.toml`, you can specify it as follows:
+
+```toml
+[dependencies]
+# ...
+pest = { version = "2", default-features = false }
+pest_derive = { version = "2", default-features = false }
+```
+
+If you want to build these crates in the pest repository's workspace, you can
+pass the `--no-default-features` flag to `cargo` and specify these crates using
+the `--package` (`-p`) flag. For example:
+
+```bash
+$ cargo build --target thumbv7em-none-eabihf --no-default-features -p pest
+$ cargo bootstrap
+$ cargo build --target thumbv7em-none-eabihf --no-default-features -p pest_derive
+```
 
 ## Special thanks
 
