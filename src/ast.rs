@@ -94,6 +94,9 @@ pub enum Expr {
     Skip(Vec<String>),
     /// Matches an expression and pushes it to the stack, e.g. `push(e)`
     Push(Box<Expr>),
+    /// Matches an expression and assigns a label to it, e.g. #label = exp
+    #[cfg(feature = "grammar-extras")]
+    NodeTag(Box<Expr>, String),
 }
 
 impl Expr {
@@ -114,7 +117,6 @@ impl Expr {
             let expr = f(expr);
 
             match expr {
-                // TODO: Use box syntax when it gets stabilized.
                 Expr::PosPred(expr) => {
                     let mapped = Box::new(map_internal(*expr, f));
                     Expr::PosPred(mapped)
@@ -165,6 +167,11 @@ impl Expr {
                     let mapped = Box::new(map_internal(*expr, f));
                     Expr::Push(mapped)
                 }
+                #[cfg(feature = "grammar-extras")]
+                Expr::NodeTag(expr, tag) => {
+                    let mapped = Box::new(map_internal(*expr, f));
+                    Expr::NodeTag(mapped, tag)
+                }
                 expr => expr,
             }
         }
@@ -183,7 +190,6 @@ impl Expr {
         {
             let mapped = match expr {
                 Expr::PosPred(expr) => {
-                    // TODO: Use box syntax when it gets stabilized.
                     let mapped = Box::new(map_internal(*expr, f));
                     Expr::PosPred(mapped)
                 }
@@ -233,6 +239,11 @@ impl Expr {
                     let mapped = Box::new(map_internal(*expr, f));
                     Expr::Push(mapped)
                 }
+                #[cfg(feature = "grammar-extras")]
+                Expr::NodeTag(expr, tag) => {
+                    let mapped = Box::new(map_internal(*expr, f));
+                    Expr::NodeTag(mapped, tag)
+                }
                 expr => expr,
             };
 
@@ -240,6 +251,79 @@ impl Expr {
         }
 
         map_internal(self, &mut f)
+    }
+}
+
+impl core::fmt::Display for Expr {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Expr::Str(s) => write!(f, "{:?}", s),
+            Expr::Insens(s) => write!(f, "^{:?}", s),
+            Expr::Range(start, end) => {
+                let start = start.chars().next().expect("Empty range start.");
+                let end = end.chars().next().expect("Empty range end.");
+                write!(f, "({:?}..{:?})", start, end)
+            }
+            Expr::Ident(id) => write!(f, "{}", id),
+            Expr::PeekSlice(start, end) => match end {
+                Some(end) => write!(f, "PEEK[{}..{}]", start, end),
+                None => write!(f, "PEEK[{}..]", start),
+            },
+            Expr::PosPred(expr) => write!(f, "&{}", expr.as_ref()),
+            Expr::NegPred(expr) => write!(f, "!{}", expr.as_ref()),
+            Expr::Seq(lhs, rhs) => {
+                let mut nodes = Vec::new();
+                nodes.push(lhs);
+                let mut current = rhs;
+                while let Expr::Seq(lhs, rhs) = current.as_ref() {
+                    nodes.push(lhs);
+                    current = rhs;
+                }
+                nodes.push(current);
+                let sequence = nodes
+                    .iter()
+                    .map(|node| format!("{}", node))
+                    .collect::<Vec<_>>()
+                    .join(" ~ ");
+                write!(f, "({})", sequence)
+            }
+            Expr::Choice(lhs, rhs) => {
+                let mut nodes = Vec::new();
+                nodes.push(lhs);
+                let mut current = rhs;
+                while let Expr::Choice(lhs, rhs) = current.as_ref() {
+                    nodes.push(lhs);
+                    current = rhs;
+                }
+                nodes.push(current);
+                let sequence = nodes
+                    .iter()
+                    .map(|node| format!("{}", node))
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                write!(f, "({})", sequence)
+            }
+            Expr::Opt(expr) => write!(f, "{}?", expr),
+            Expr::Rep(expr) => write!(f, "{}*", expr),
+            Expr::RepOnce(expr) => write!(f, "{}+", expr),
+            Expr::RepExact(expr, n) => write!(f, "{}{{{}}}", expr, n),
+            Expr::RepMin(expr, min) => write!(f, "{}{{{},}}", expr, min),
+            Expr::RepMax(expr, max) => write!(f, "{}{{,{}}}", expr, max),
+            Expr::RepMinMax(expr, min, max) => write!(f, "{}{{{}, {}}}", expr, min, max),
+            Expr::Skip(strings) => {
+                let strings = strings
+                    .iter()
+                    .map(|s| format!("{:?}", s))
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                write!(f, "(!({}) ~ ANY)*", strings)
+            }
+            Expr::Push(expr) => write!(f, "PUSH({})", expr),
+            #[cfg(feature = "grammar-extras")]
+            Expr::NodeTag(expr, tag) => {
+                write!(f, "(#{} = {})", tag, expr)
+            }
+        }
     }
 }
 
@@ -283,6 +367,10 @@ impl ExprTopDownIterator {
             | Expr::RepMinMax(expr, ..)
             | Expr::Opt(expr)
             | Expr::Push(expr) => {
+                self.next = Some(*expr);
+            }
+            #[cfg(feature = "grammar-extras")]
+            Expr::NodeTag(expr, _) => {
                 self.next = Some(*expr);
             }
             _ => {
@@ -347,7 +435,260 @@ mod tests {
             expr.clone()
                 .map_bottom_up(|expr| expr)
                 .map_top_down(|expr| expr),
-            expr
+            expr,
         );
+    }
+
+    mod display {
+        use super::super::*;
+
+        #[test]
+        fn string() {
+            assert_eq!(Expr::Str("a".to_owned()).to_string(), r#""a""#);
+        }
+
+        #[test]
+        fn insens() {
+            assert_eq!(Expr::Insens("a".to_owned()).to_string(), r#"^"a""#);
+        }
+
+        #[test]
+        fn range() {
+            assert_eq!(
+                Expr::Range("a".to_owned(), "z".to_owned()).to_string(),
+                r#"('a'..'z')"#,
+            );
+        }
+
+        #[test]
+        fn ident() {
+            assert_eq!(Expr::Ident("a".to_owned()).to_string(), "a");
+        }
+
+        #[test]
+        fn peek_slice() {
+            assert_eq!(Expr::PeekSlice(0, None).to_string(), "PEEK[0..]");
+            assert_eq!(Expr::PeekSlice(0, Some(-1)).to_string(), "PEEK[0..-1]");
+        }
+
+        #[test]
+        fn pos_pred() {
+            assert_eq!(
+                Expr::PosPred(Box::new(Expr::Ident("e".to_owned()))).to_string(),
+                "&e",
+            );
+        }
+
+        #[test]
+        fn neg_pred() {
+            assert_eq!(
+                Expr::NegPred(Box::new(Expr::Ident("e".to_owned()))).to_string(),
+                "!e",
+            );
+        }
+
+        #[test]
+        fn seq() {
+            assert_eq!(
+                Expr::Seq(
+                    Box::new(Expr::Ident("e1".to_owned())),
+                    Box::new(Expr::Ident("e2".to_owned())),
+                )
+                .to_string(),
+                "(e1 ~ e2)",
+            );
+            assert_eq!(
+                Expr::Seq(
+                    Box::new(Expr::Ident("e1".to_owned())),
+                    Box::new(Expr::Seq(
+                        Box::new(Expr::Ident("e2".to_owned())),
+                        Box::new(Expr::Ident("e3".to_owned())),
+                    )),
+                )
+                .to_string(),
+                "(e1 ~ e2 ~ e3)",
+            );
+            assert_eq!(
+                Expr::Seq(
+                    Box::new(Expr::Ident("e1".to_owned())),
+                    Box::new(Expr::Seq(
+                        Box::new(Expr::Ident("e2".to_owned())),
+                        Box::new(Expr::Seq(
+                            Box::new(Expr::Ident("e3".to_owned())),
+                            Box::new(Expr::Ident("e4".to_owned())),
+                        )),
+                    )),
+                )
+                .to_string(),
+                "(e1 ~ e2 ~ e3 ~ e4)",
+            );
+            assert_eq!(
+                Expr::Seq(
+                    Box::new(Expr::Ident("e1".to_owned())),
+                    Box::new(Expr::Choice(
+                        Box::new(Expr::Ident("e2".to_owned())),
+                        Box::new(Expr::Seq(
+                            Box::new(Expr::Ident("e3".to_owned())),
+                            Box::new(Expr::Ident("e4".to_owned())),
+                        )),
+                    )),
+                )
+                .to_string(),
+                "(e1 ~ (e2 | (e3 ~ e4)))",
+            );
+            assert_eq!(
+                Expr::Seq(
+                    Box::new(Expr::Ident("e1".to_owned())),
+                    Box::new(Expr::Seq(
+                        Box::new(Expr::Ident("e2".to_owned())),
+                        Box::new(Expr::Choice(
+                            Box::new(Expr::Ident("e3".to_owned())),
+                            Box::new(Expr::Ident("e4".to_owned())),
+                        )),
+                    )),
+                )
+                .to_string(),
+                "(e1 ~ e2 ~ (e3 | e4))",
+            );
+        }
+
+        #[test]
+        fn choice() {
+            assert_eq!(
+                Expr::Choice(
+                    Box::new(Expr::Ident("e1".to_owned())),
+                    Box::new(Expr::Ident("e2".to_owned())),
+                )
+                .to_string(),
+                "(e1 | e2)",
+            );
+            assert_eq!(
+                Expr::Choice(
+                    Box::new(Expr::Ident("e1".to_owned())),
+                    Box::new(Expr::Choice(
+                        Box::new(Expr::Ident("e2".to_owned())),
+                        Box::new(Expr::Ident("e3".to_owned())),
+                    )),
+                )
+                .to_string(),
+                "(e1 | e2 | e3)",
+            );
+            assert_eq!(
+                Expr::Choice(
+                    Box::new(Expr::Ident("e1".to_owned())),
+                    Box::new(Expr::Choice(
+                        Box::new(Expr::Ident("e2".to_owned())),
+                        Box::new(Expr::Choice(
+                            Box::new(Expr::Ident("e3".to_owned())),
+                            Box::new(Expr::Ident("e4".to_owned())),
+                        )),
+                    )),
+                )
+                .to_string(),
+                "(e1 | e2 | e3 | e4)",
+            );
+            assert_eq!(
+                Expr::Choice(
+                    Box::new(Expr::Ident("e1".to_owned())),
+                    Box::new(Expr::Seq(
+                        Box::new(Expr::Ident("e2".to_owned())),
+                        Box::new(Expr::Choice(
+                            Box::new(Expr::Ident("e3".to_owned())),
+                            Box::new(Expr::Ident("e4".to_owned())),
+                        )),
+                    )),
+                )
+                .to_string(),
+                "(e1 | (e2 ~ (e3 | e4)))",
+            );
+        }
+
+        #[test]
+        fn opt() {
+            assert_eq!(
+                Expr::Opt(Box::new(Expr::Ident("e".to_owned()))).to_string(),
+                "e?",
+            );
+        }
+
+        #[test]
+        fn rep() {
+            assert_eq!(
+                Expr::Rep(Box::new(Expr::Ident("e".to_owned()))).to_string(),
+                "e*",
+            );
+        }
+
+        #[test]
+        fn rep_once() {
+            assert_eq!(
+                Expr::RepOnce(Box::new(Expr::Ident("e".to_owned()))).to_string(),
+                "e+",
+            );
+        }
+
+        #[test]
+        fn rep_exact() {
+            assert_eq!(
+                Expr::RepExact(Box::new(Expr::Ident("e".to_owned())), 1).to_string(),
+                "e{1}",
+            );
+        }
+
+        #[test]
+        fn rep_min() {
+            assert_eq!(
+                Expr::RepMin(Box::new(Expr::Ident("e".to_owned())), 1).to_string(),
+                "e{1,}",
+            );
+        }
+
+        #[test]
+        fn rep_max() {
+            assert_eq!(
+                Expr::RepMax(Box::new(Expr::Ident("e".to_owned())), 1).to_string(),
+                "e{,1}",
+            );
+        }
+
+        #[test]
+        fn rep_min_max() {
+            assert_eq!(
+                Expr::RepMinMax(Box::new(Expr::Ident("e".to_owned())), 1, 2).to_string(),
+                "e{1, 2}",
+            );
+        }
+
+        #[test]
+        fn skip() {
+            assert_eq!(
+                Expr::Skip(
+                    ["a", "bc"]
+                        .into_iter()
+                        .map(|s| s.to_owned())
+                        .collect::<Vec<_>>(),
+                )
+                .to_string(),
+                r#"(!("a" | "bc") ~ ANY)*"#,
+            );
+        }
+
+        #[test]
+        fn push() {
+            assert_eq!(
+                Expr::Push(Box::new(Expr::Ident("e".to_owned()))).to_string(),
+                "PUSH(e)",
+            );
+        }
+
+        #[test]
+        #[cfg(feature = "grammar-extras")]
+        fn node_tag() {
+            assert_eq!(
+                Expr::NodeTag(Box::new(Expr::Ident("expr".to_owned())), "label".to_owned())
+                    .to_string(),
+                "(#label = expr)",
+            );
+        }
     }
 }

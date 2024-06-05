@@ -15,20 +15,18 @@ use std::iter::Peekable;
 use pest::error::{Error, ErrorVariant};
 use pest::iterators::{Pair, Pairs};
 use pest::pratt_parser::{Assoc, Op, PrattParser};
-use pest::{Parser, Span};
+use pest::{Parser, Position, Span};
 
 use crate::ast::{Expr, Rule as AstRule, RuleType};
 use crate::validator;
 
-/// TODO: fix the generator to at least add explicit lifetimes
-#[allow(
-    missing_docs,
-    unused_attributes,
-    elided_lifetimes_in_paths,
-    unused_qualifications
-)]
+#[allow(missing_docs, unused_qualifications)]
 mod grammar {
+    #[cfg(not(feature = "not-bootstrap-in-src"))]
     include!("grammar.rs");
+
+    #[cfg(feature = "not-bootstrap-in-src")]
+    include!(concat!(env!("OUT_DIR"), "/__pest_grammar.rs"));
 }
 
 pub use self::grammar::*;
@@ -76,7 +74,6 @@ impl<'i> ParserNode<'i> {
             }
 
             match node.expr {
-                // TODO: Use box syntax when it gets stabilized.
                 ParserExpr::PosPred(node) => {
                     filter_internal(*node, f, result);
                 }
@@ -164,6 +161,9 @@ pub enum ParserExpr<'i> {
     RepMinMax(Box<ParserNode<'i>>, u32, u32),
     /// Matches an expression and pushes it to the stack, e.g. `push(e)`
     Push(Box<ParserNode<'i>>),
+    /// Matches an expression and assigns a label to it, e.g. #label = exp
+    #[cfg(feature = "grammar-extras")]
+    NodeTag(Box<ParserNode<'i>>, String),
 }
 
 fn convert_rule(rule: ParserRule<'_>) -> AstRule {
@@ -199,6 +199,8 @@ fn convert_node(node: ParserNode<'_>) -> Expr {
             Expr::RepMinMax(Box::new(convert_node(*node)), min, max)
         }
         ParserExpr::Push(node) => Expr::Push(Box::new(convert_node(*node))),
+        #[cfg(feature = "grammar-extras")]
+        ParserExpr::NodeTag(node, tag) => Expr::NodeTag(Box::new(convert_node(*node)), tag),
     }
 }
 
@@ -305,6 +307,29 @@ fn consume_rules_with_spans(
         .collect()
 }
 
+fn get_node_tag<'i>(
+    pairs: &mut Peekable<Pairs<'i, Rule>>,
+) -> (Pair<'i, Rule>, Option<(String, Position<'i>)>) {
+    let pair_or_tag = pairs.next().unwrap();
+    if let Some(next_pair) = pairs.peek() {
+        if next_pair.as_rule() == Rule::assignment_operator {
+            pairs.next().unwrap();
+            let pair = pairs.next().unwrap();
+            (
+                pair,
+                Some((
+                    pair_or_tag.as_str()[1..].to_string(),
+                    pair_or_tag.as_span().start_pos(),
+                )),
+            )
+        } else {
+            (pair_or_tag, None)
+        }
+    } else {
+        (pair_or_tag, None)
+    }
+}
+
 fn consume_expr<'i>(
     pairs: Peekable<Pairs<'i, Rule>>,
     pratt: &PrattParser<Rule>,
@@ -313,7 +338,10 @@ fn consume_expr<'i>(
         mut pairs: Peekable<Pairs<'i, Rule>>,
         pratt: &PrattParser<Rule>,
     ) -> Result<ParserNode<'i>, Vec<Error<Rule>>> {
-        let pair = pairs.next().unwrap();
+        #[cfg(feature = "grammar-extras")]
+        let (pair, tag_start) = get_node_tag(&mut pairs);
+        #[cfg(not(feature = "grammar-extras"))]
+        let (pair, _tag_start) = get_node_tag(&mut pairs);
 
         let node = match pair.as_rule() {
             Rule::opening_paren => {
@@ -370,7 +398,7 @@ fn consume_expr<'i>(
                                 pairs.next().unwrap(); // ..
                                 pair_start.as_str().parse().unwrap()
                             }
-                            _ => unreachable!(),
+                            _ => unreachable!("peek start"),
                         };
                         let pair_end = pairs.next().unwrap(); // integer or }
                         let end: Option<i32> = match pair_end.as_rule() {
@@ -379,7 +407,7 @@ fn consume_expr<'i>(
                                 pairs.next().unwrap(); // }
                                 Some(pair_end.as_str().parse().unwrap())
                             }
-                            _ => unreachable!(),
+                            _ => unreachable!("peek end"),
                         };
                         ParserNode {
                             expr: ParserExpr::PeekSlice(start, end),
@@ -422,193 +450,198 @@ fn consume_expr<'i>(
                             span: start_pos.span(&end_pos),
                         }
                     }
-                    _ => unreachable!(),
+                    x => unreachable!("other rule: {:?}", x),
                 };
 
-                pairs.fold(
-                    Ok(node),
-                    |node: Result<ParserNode<'i>, Vec<Error<Rule>>>, pair| {
-                        let node = node?;
-
-                        let node = match pair.as_rule() {
-                            Rule::optional_operator => {
-                                let start = node.span.start_pos();
-                                ParserNode {
-                                    expr: ParserExpr::Opt(Box::new(node)),
-                                    span: start.span(&pair.as_span().end_pos()),
-                                }
+                pairs.try_fold(node, |node: ParserNode<'i>, pair: Pair<'i, Rule>| {
+                    let node = match pair.as_rule() {
+                        Rule::optional_operator => {
+                            let start = node.span.start_pos();
+                            ParserNode {
+                                expr: ParserExpr::Opt(Box::new(node)),
+                                span: start.span(&pair.as_span().end_pos()),
                             }
-                            Rule::repeat_operator => {
-                                let start = node.span.start_pos();
-                                ParserNode {
-                                    expr: ParserExpr::Rep(Box::new(node)),
-                                    span: start.span(&pair.as_span().end_pos()),
-                                }
+                        }
+                        Rule::repeat_operator => {
+                            let start = node.span.start_pos();
+                            ParserNode {
+                                expr: ParserExpr::Rep(Box::new(node)),
+                                span: start.span(&pair.as_span().end_pos()),
                             }
-                            Rule::repeat_once_operator => {
-                                let start = node.span.start_pos();
-                                ParserNode {
-                                    expr: ParserExpr::RepOnce(Box::new(node)),
-                                    span: start.span(&pair.as_span().end_pos()),
-                                }
+                        }
+                        Rule::repeat_once_operator => {
+                            let start = node.span.start_pos();
+                            ParserNode {
+                                expr: ParserExpr::RepOnce(Box::new(node)),
+                                span: start.span(&pair.as_span().end_pos()),
                             }
-                            Rule::repeat_exact => {
-                                let mut inner = pair.clone().into_inner();
+                        }
+                        Rule::repeat_exact => {
+                            let mut inner = pair.clone().into_inner();
 
-                                inner.next().unwrap(); // opening_brace
+                            inner.next().unwrap(); // opening_brace
 
-                                let number = inner.next().unwrap();
-                                let num = if let Ok(num) = number.as_str().parse::<u32>() {
-                                    num
-                                } else {
-                                    return Err(vec![Error::new_from_span(
-                                        ErrorVariant::CustomError {
-                                            message: "number cannot overflow u32".to_owned(),
-                                        },
-                                        number.as_span(),
-                                    )]);
-                                };
+                            let number = inner.next().unwrap();
+                            let num = if let Ok(num) = number.as_str().parse::<u32>() {
+                                num
+                            } else {
+                                return Err(vec![Error::new_from_span(
+                                    ErrorVariant::CustomError {
+                                        message: "number cannot overflow u32".to_owned(),
+                                    },
+                                    number.as_span(),
+                                )]);
+                            };
 
-                                if num == 0 {
-                                    let error: Error<Rule> = Error::new_from_span(
-                                        ErrorVariant::CustomError {
-                                            message: "cannot repeat 0 times".to_owned(),
-                                        },
-                                        number.as_span(),
-                                    );
+                            if num == 0 {
+                                let error: Error<Rule> = Error::new_from_span(
+                                    ErrorVariant::CustomError {
+                                        message: "cannot repeat 0 times".to_owned(),
+                                    },
+                                    number.as_span(),
+                                );
 
-                                    return Err(vec![error]);
-                                }
-
-                                let start = node.span.start_pos();
-                                ParserNode {
-                                    expr: ParserExpr::RepExact(Box::new(node), num),
-                                    span: start.span(&pair.as_span().end_pos()),
-                                }
+                                return Err(vec![error]);
                             }
-                            Rule::repeat_min => {
-                                let mut inner = pair.clone().into_inner();
 
-                                inner.next().unwrap(); // opening_brace
-
-                                let min_number = inner.next().unwrap();
-                                let min = if let Ok(min) = min_number.as_str().parse::<u32>() {
-                                    min
-                                } else {
-                                    return Err(vec![Error::new_from_span(
-                                        ErrorVariant::CustomError {
-                                            message: "number cannot overflow u32".to_owned(),
-                                        },
-                                        min_number.as_span(),
-                                    )]);
-                                };
-
-                                let start = node.span.start_pos();
-                                ParserNode {
-                                    expr: ParserExpr::RepMin(Box::new(node), min),
-                                    span: start.span(&pair.as_span().end_pos()),
-                                }
+                            let start = node.span.start_pos();
+                            ParserNode {
+                                expr: ParserExpr::RepExact(Box::new(node), num),
+                                span: start.span(&pair.as_span().end_pos()),
                             }
-                            Rule::repeat_max => {
-                                let mut inner = pair.clone().into_inner();
+                        }
+                        Rule::repeat_min => {
+                            let mut inner = pair.clone().into_inner();
 
-                                inner.next().unwrap(); // opening_brace
-                                inner.next().unwrap(); // comma
+                            inner.next().unwrap(); // opening_brace
 
-                                let max_number = inner.next().unwrap();
-                                let max = if let Ok(max) = max_number.as_str().parse::<u32>() {
-                                    max
-                                } else {
-                                    return Err(vec![Error::new_from_span(
-                                        ErrorVariant::CustomError {
-                                            message: "number cannot overflow u32".to_owned(),
-                                        },
-                                        max_number.as_span(),
-                                    )]);
-                                };
+                            let min_number = inner.next().unwrap();
+                            let min = if let Ok(min) = min_number.as_str().parse::<u32>() {
+                                min
+                            } else {
+                                return Err(vec![Error::new_from_span(
+                                    ErrorVariant::CustomError {
+                                        message: "number cannot overflow u32".to_owned(),
+                                    },
+                                    min_number.as_span(),
+                                )]);
+                            };
 
-                                if max == 0 {
-                                    let error: Error<Rule> = Error::new_from_span(
-                                        ErrorVariant::CustomError {
-                                            message: "cannot repeat 0 times".to_owned(),
-                                        },
-                                        max_number.as_span(),
-                                    );
-
-                                    return Err(vec![error]);
-                                }
-
-                                let start = node.span.start_pos();
-                                ParserNode {
-                                    expr: ParserExpr::RepMax(Box::new(node), max),
-                                    span: start.span(&pair.as_span().end_pos()),
-                                }
+                            let start = node.span.start_pos();
+                            ParserNode {
+                                expr: ParserExpr::RepMin(Box::new(node), min),
+                                span: start.span(&pair.as_span().end_pos()),
                             }
-                            Rule::repeat_min_max => {
-                                let mut inner = pair.clone().into_inner();
+                        }
+                        Rule::repeat_max => {
+                            let mut inner = pair.clone().into_inner();
 
-                                inner.next().unwrap(); // opening_brace
+                            inner.next().unwrap(); // opening_brace
+                            inner.next().unwrap(); // comma
 
-                                let min_number = inner.next().unwrap();
-                                let min = if let Ok(min) = min_number.as_str().parse::<u32>() {
-                                    min
-                                } else {
-                                    return Err(vec![Error::new_from_span(
-                                        ErrorVariant::CustomError {
-                                            message: "number cannot overflow u32".to_owned(),
-                                        },
-                                        min_number.as_span(),
-                                    )]);
-                                };
+                            let max_number = inner.next().unwrap();
+                            let max = if let Ok(max) = max_number.as_str().parse::<u32>() {
+                                max
+                            } else {
+                                return Err(vec![Error::new_from_span(
+                                    ErrorVariant::CustomError {
+                                        message: "number cannot overflow u32".to_owned(),
+                                    },
+                                    max_number.as_span(),
+                                )]);
+                            };
 
-                                inner.next().unwrap(); // comma
+                            if max == 0 {
+                                let error: Error<Rule> = Error::new_from_span(
+                                    ErrorVariant::CustomError {
+                                        message: "cannot repeat 0 times".to_owned(),
+                                    },
+                                    max_number.as_span(),
+                                );
 
-                                let max_number = inner.next().unwrap();
-                                let max = if let Ok(max) = max_number.as_str().parse::<u32>() {
-                                    max
-                                } else {
-                                    return Err(vec![Error::new_from_span(
-                                        ErrorVariant::CustomError {
-                                            message: "number cannot overflow u32".to_owned(),
-                                        },
-                                        max_number.as_span(),
-                                    )]);
-                                };
-
-                                if max == 0 {
-                                    let error: Error<Rule> = Error::new_from_span(
-                                        ErrorVariant::CustomError {
-                                            message: "cannot repeat 0 times".to_owned(),
-                                        },
-                                        max_number.as_span(),
-                                    );
-
-                                    return Err(vec![error]);
-                                }
-
-                                let start = node.span.start_pos();
-                                ParserNode {
-                                    expr: ParserExpr::RepMinMax(Box::new(node), min, max),
-                                    span: start.span(&pair.as_span().end_pos()),
-                                }
+                                return Err(vec![error]);
                             }
-                            Rule::closing_paren => {
-                                let start = node.span.start_pos();
 
-                                ParserNode {
-                                    expr: node.expr,
-                                    span: start.span(&pair.as_span().end_pos()),
-                                }
+                            let start = node.span.start_pos();
+                            ParserNode {
+                                expr: ParserExpr::RepMax(Box::new(node), max),
+                                span: start.span(&pair.as_span().end_pos()),
                             }
-                            _ => unreachable!(),
-                        };
+                        }
+                        Rule::repeat_min_max => {
+                            let mut inner = pair.clone().into_inner();
 
-                        Ok(node)
-                    },
-                )?
+                            inner.next().unwrap(); // opening_brace
+
+                            let min_number = inner.next().unwrap();
+                            let min = if let Ok(min) = min_number.as_str().parse::<u32>() {
+                                min
+                            } else {
+                                return Err(vec![Error::new_from_span(
+                                    ErrorVariant::CustomError {
+                                        message: "number cannot overflow u32".to_owned(),
+                                    },
+                                    min_number.as_span(),
+                                )]);
+                            };
+
+                            inner.next().unwrap(); // comma
+
+                            let max_number = inner.next().unwrap();
+                            let max = if let Ok(max) = max_number.as_str().parse::<u32>() {
+                                max
+                            } else {
+                                return Err(vec![Error::new_from_span(
+                                    ErrorVariant::CustomError {
+                                        message: "number cannot overflow u32".to_owned(),
+                                    },
+                                    max_number.as_span(),
+                                )]);
+                            };
+
+                            if max == 0 {
+                                let error: Error<Rule> = Error::new_from_span(
+                                    ErrorVariant::CustomError {
+                                        message: "cannot repeat 0 times".to_owned(),
+                                    },
+                                    max_number.as_span(),
+                                );
+
+                                return Err(vec![error]);
+                            }
+
+                            let start = node.span.start_pos();
+                            ParserNode {
+                                expr: ParserExpr::RepMinMax(Box::new(node), min, max),
+                                span: start.span(&pair.as_span().end_pos()),
+                            }
+                        }
+                        Rule::closing_paren => {
+                            let start = node.span.start_pos();
+
+                            ParserNode {
+                                expr: node.expr,
+                                span: start.span(&pair.as_span().end_pos()),
+                            }
+                        }
+                        rule => unreachable!("node: {:?}", rule),
+                    };
+
+                    Ok(node)
+                })?
             }
         };
-
+        #[cfg(feature = "grammar-extras")]
+        if let Some((tag, start)) = tag_start {
+            let span = start.span(&node.span.end_pos());
+            Ok(ParserNode {
+                expr: ParserExpr::NodeTag(Box::new(node), tag),
+                span,
+            })
+        } else {
+            Ok(node)
+        }
+        #[cfg(not(feature = "grammar-extras"))]
         Ok(node)
     }
 
@@ -640,7 +673,7 @@ fn consume_expr<'i>(
                 span: start.span(&end),
             })
         }
-        _ => unreachable!(),
+        _ => unreachable!("infix"),
     };
 
     pratt.map_primary(term).map_infix(infix).parse(pairs)
@@ -1143,7 +1176,7 @@ mod tests {
             parser: PestParser,
             input: "0",
             rule: Rule::grammar_rules,
-            positives: vec![Rule::grammar_rule, Rule::grammar_doc],
+            positives: vec![Rule::EOI, Rule::grammar_rule, Rule::grammar_doc],
             negatives: vec![],
             pos: 0
         };
@@ -1358,12 +1391,86 @@ mod tests {
     }
 
     #[test]
+    fn node_tag() {
+        parses_to! {
+            parser: PestParser,
+            input: "#a = a",
+            rule: Rule::expression,
+            tokens: [
+                expression(0, 6, [
+                    term(0, 6, [
+                        tag_id(0, 2),
+                        assignment_operator(3, 4),
+                        identifier(5, 6)
+                    ])
+                ])
+            ]
+        };
+    }
+
+    #[test]
+    fn incomplete_node_tag() {
+        fails_with! {
+            parser: PestParser,
+            input: "a = { # }",
+            rule: Rule::grammar_rules,
+            positives: vec![
+                Rule::expression
+            ],
+            negatives: vec![],
+            pos: 6
+        };
+    }
+
+    #[test]
+    fn incomplete_node_tag_assignment() {
+        fails_with! {
+            parser: PestParser,
+            input: "a = { #a = }",
+            rule: Rule::grammar_rules,
+            positives: vec![
+                Rule::opening_paren,
+                Rule::positive_predicate_operator,
+                Rule::negative_predicate_operator,
+                Rule::_push,
+                Rule::peek_slice,
+                Rule::identifier,
+                Rule::insensitive_string,
+                Rule::quote,
+                Rule::single_quote
+            ],
+            negatives: vec![],
+            pos: 11
+        };
+    }
+
+    #[test]
+    fn incomplete_node_tag_pound_key() {
+        fails_with! {
+            parser: PestParser,
+            input: "a = { a = a }",
+            rule: Rule::grammar_rules,
+            positives: vec![
+                Rule::opening_brace,
+                Rule::closing_brace,
+                Rule::sequence_operator,
+                Rule::choice_operator,
+                Rule::optional_operator,
+                Rule::repeat_operator,
+                Rule::repeat_once_operator
+            ],
+            negatives: vec![],
+            pos: 8
+        };
+    }
+
+    #[test]
     fn ast() {
-        let input = r##"
+        let input = r#"
         /// This is line comment
         /// This is rule
         rule = _{ a{1} ~ "a"{3,} ~ b{, 2} ~ "b"{1, 2} | !(^"c" | PUSH('d'..'e'))?* }
-        "##;
+        "#;
 
         let pairs = PestParser::parse(Rule::grammar_rules, input).unwrap();
         let ast = consume_rules_with_spans(pairs).unwrap();
